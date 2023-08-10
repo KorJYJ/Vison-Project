@@ -4,29 +4,13 @@ from torchvision.models import vgg16
 import torchvision
 import cv2
 import numpy as np
-
+import math
 import sys
 import os
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from  layers.blocks import *
-
-anchor_boxes = [
-    [[8, 16], [16, 8], [11.3, 11.3]],
-    [[11.3, 22.6], [22.6, 11.3], [16, 16]],
-    [[16, 32],[32, 16], [22.6, 22.6]]
-    ]
-
-def make_anchor_box(image_size : tuple):
-    bboxes = []
-    for y, row in enumerate(anchor_boxes):
-        for x, col in enumerate(row):
-            w, h = col
-            bbox = [x, y, w, h]
-            bboxes.append(bbox)
-    
-    return bboxes
 
 class RPN(nn.Module):
     def __init__(self, in_ch):
@@ -76,25 +60,24 @@ class MyFasterRCNN(nn.Module):
 
 
 if __name__ == '__main__':
-    print(make_anchor_box((1, 2)))
-    # vgg = vgg16(weights = torchvision.models.VGG16_Weights.IMAGENET1K_V1).features
-    # rpn = RPN(512)
+    vgg = vgg16(weights = torchvision.models.VGG16_Weights.IMAGENET1K_V1).features
+    rpn = RPN(512)
 
 
-    # img = cv2.imread("D:\study\data\cat.jpg")
-    # img = cv2.resize(img, (256, 256))
-    # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) / 255.
-    # img /= np.array([0.485, 0.456, 0.406])
+    img = cv2.imread("D:\study\data\cat.jpg")
+    img = cv2.resize(img, (256, 256))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) / 255.
+    img /= np.array([0.485, 0.456, 0.406])
 
-    # rpn = rpn .cuda()
-    # vgg = vgg.cuda()
-    # vgg.eval()
-    # rpn.eval()
+    rpn = rpn .cuda()
+    vgg = vgg.cuda()
+    vgg.eval()
+    rpn.eval()
 
-    # img = torch.from_numpy(img).permute(2, 0, 1).cuda().unsqueeze(0).float()
+    img = torch.from_numpy(img).permute(2, 0, 1).cuda().unsqueeze(0).float()
 
-    # vgg_feature = vgg.forward(img)
-    # bbox_proposal, score_proposal = rpn(vgg_feature)
+    vgg_feature = vgg.forward(img)
+    bbox_proposal, score_proposal = rpn(vgg_feature)
 
-    # print(bbox_proposal.shape)
-    # print(score_proposal.shape)
+    print(bbox_proposal.shape)
+    print(score_proposal.shape)
