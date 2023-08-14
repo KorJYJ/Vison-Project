@@ -9,7 +9,7 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler
 import tqdm
 from utils.parser_argument import argparse_config
 
-argparse_config()
+args = argparse_config()
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'

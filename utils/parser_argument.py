@@ -9,3 +9,5 @@ def argparse_config():
     parser.add_argument("--wandb", help="Wandb 사용 여부", action="store_true")
 
     args = parser.parse_args()
+
+    return args
