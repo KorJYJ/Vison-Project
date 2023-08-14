@@ -4,11 +4,12 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 import torch.multiprocessing as mp
-
 from torch.nn.parallel import DistributedDataParallel as DDP
-
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 import tqdm
+from utils.parser_argument import argparse_config
+
+argparse_config()
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -60,28 +61,36 @@ def demo_basic(rank, world_size):
 
     dataloader = DataLoader(
         dataset,
-        batch_size=1,
+        batch_size=args.batch_size,
         shuffle=False,
         sampler=sampler
     )
 
     # create model and move it to GPu with id rank
     model = ToyModel().to(rank)
+
+    if args.fp16:
+        model = model.half()
+
     ddp_model = DDP(model, device_ids=[rank])
 
     loss_fn = nn.MSELoss()
     optimizer = optim.SGD(ddp_model.parameters(), lr = 0.001)
 
-    for i, (x, y) in tqdm.tqdm(enumerate(dataloader)):
-        optimizer.zero_grad()
+    for epoch in tqdm.tqdm(range(args.epochs)):
+        for i, (x, y) in enumerate(dataloader):
+            if args.fp16:
+                x = x.half()
 
-        ouptuts = ddp_model(x.to(rank))
-        labels = y.to(rank)
-        loss_fn(ouptuts, labels).backward()
-        optimizer.step()
+            optimizer.zero_grad()
+            ouptuts = ddp_model(x.to(rank))
+            labels = y.to(rank)
+            loss_fn(ouptuts, labels).backward()
+            optimizer.step()
 
-        if i == 5:
-            break
+            if i == 5:
+                break
+  
     cleanup()
 
 def run_demo(demo_fn, world_size):
