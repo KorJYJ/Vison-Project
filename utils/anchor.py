@@ -27,6 +27,8 @@ def make_anchor_box(image_size : list = [224, 224], gride_size : list = [7, 7]):
 
     return bboxes
 
+def select_anchor_box():
+    pass
 
 # anchor_boxes = [
 #     [8, 16], [16, 8], [11.3, 11.3],
