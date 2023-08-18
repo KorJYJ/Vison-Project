@@ -4,7 +4,7 @@ import numpy as np
 anchor_bbox_area = [128, 256, 512]
 anchor_bbox_ratio = [[1, 1], [2, 1], [1, 2]]
 
-def make_anchor_box(image_size : list = [224, 224], gride_size : list = [7, 7]):
+def make_anchor_box(image_size : list or tuple = [224, 224], gride_size : list or tuple = [7, 7]):
     bboxes = []
     y_index, x_index = gride_size
     y_scale = image_size[0] / gride_size[0]
@@ -27,6 +27,9 @@ def make_anchor_box(image_size : list = [224, 224], gride_size : list = [7, 7]):
 
     return bboxes
 
+if __name__ == "__main__":
+    bboxes = make_anchor_box([800, 800], [25, 25])
+    print(bboxes.shape)
 
 # anchor_boxes = [
 #     [8, 16], [16, 8], [11.3, 11.3],

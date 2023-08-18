@@ -18,4 +18,4 @@ def VOC_bbox(file_path):
 
 if __name__ == "__main__":
     sample = "D:\\datasets\\VOCdevkit\\VOC2012\\Annotations\\2007_000033.xml"
-    VOC_bbox(sample)
+    print(VOC_bbox(sample))
