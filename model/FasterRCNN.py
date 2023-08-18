@@ -12,6 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from layers.blocks import *
 from utils.anchor import make_anchor_box
+from utils.bbox import VOC_bbox
 
 class RPN(nn.Module):
     def __init__(self, in_ch, grid_size):
@@ -73,6 +74,13 @@ class MyFasterRCNN(nn.Module):
         bbox = self.bounding_box(x)
 
         return cls, bbox
+
+def train():
+    vgg = vgg16(weights = torchvision.models.VGG16_Weights.IMAGENET1K_V1).features.cuda()
+    rpn = RPN(512, grid_size=grid_size).cuda()
+
+    img = cv2.imread("d:\\datasets\\VOCdevkit\\VOC2012\\JPEGImages\\2007_000925.jpg")
+    bboxes, labels = VOC_bbox("d:\\datasets\\VOCdevkit\\VOC2012\\Annotations\\2007_000925.xml")
 
 
 if __name__ == '__main__':
@@ -148,6 +156,7 @@ if __name__ == '__main__':
     scale = 25/800
     roi_pool_feature = torchvision.ops.roi_pool(vgg_feature, [bboxes], (7, 7), scale)
     print(f"roi_pool_feature : {roi_pool_feature.shape}")
+
     # 8. Faster RCN
     out_classes, out_bboxes = faster_rcnn(roi_pool_feature.view(roi_pool_feature.shape[0], -1))
     print(f"out classes : {out_classes.shape}")
