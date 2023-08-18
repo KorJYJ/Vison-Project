@@ -27,9 +27,6 @@ def make_anchor_box(image_size : list or tuple = [224, 224], gride_size : list o
 
     return bboxes
 
-if __name__ == "__main__":
-    bboxes = make_anchor_box([800, 800], [25, 25])
-    print(bboxes.shape)
 
 # anchor_boxes = [
 #     [8, 16], [16, 8], [11.3, 11.3],
