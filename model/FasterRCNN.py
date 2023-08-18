@@ -14,6 +14,18 @@ from layers.blocks import *
 from utils.anchor import make_anchor_box
 from utils.bbox import VOC_bbox
 
+class VGG16(nn.Module):
+    def __init__(self, weights = torchvision.models.VGG16_Weights.IMAGENET1K_V1):
+        super(VGG16, self).__int__()
+        self.vgg = vgg16(weights = weights).features
+
+
+    def forward(self, x):
+        feature = self.vgg(x)
+
+        return feature
+    
+
 class RPN(nn.Module):
     def __init__(self, in_ch, grid_size):
         super(RPN, self).__init__()
