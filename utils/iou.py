@@ -2,6 +2,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import numpy as np
+
 from cython_bbox import bbox_overlaps as bbox_ious
 from utils.anchor import make_anchor_box
 from utils.bbox import VOC_bbox

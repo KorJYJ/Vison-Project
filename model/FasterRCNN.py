@@ -1,18 +1,20 @@
 import torch
 from torch import nn
 from torchvision.models import vgg16
+from torch.nn import functional as F
+
 import torchvision
 import cv2
 import numpy as np
 import math
 import sys
 import os
-
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from layers.blocks import *
 from utils.anchor import make_anchor_box
 from utils.bbox import VOC_bbox
+from utils.iou import ious
 
 class VGG16(nn.Module):
     def __init__(self, weights = torchvision.models.VGG16_Weights.IMAGENET1K_V1):
@@ -56,6 +58,93 @@ class RPN(nn.Module):
         score_proposal = score_proposal.view(batch, self.grid_y, self.grid_x, 9, 2)
 
         return bbox_proposal, score_proposal
+    
+    def anchor_sampling(self, bbox_proposal, target_bboxes, random_choice = 128):
+        """
+        1. Positive Sample
+            1) anchor bboxes_regressor와 target bboxes의 IoU가 가장 큰것
+            2) anchor bboxes regressor와 target bboxes의 IoU가 0.7 이상인 것
+
+        2. Negative Smpale
+            1) anchor bboxes regressor와 target bboxe의 IoU가 0.3 이하인 것
+            
+        Positive sample과 Negative sample에서 128:128로 샘플링
+        여기서 만약 Positive sample의 개수가 부족하다면 Negative Sample로 추가
+        
+        Args:
+            bbox_proposal (torch.Tensor): anchor_bboxes_regressor
+            target_bboxes (torch.Tensor): target box
+        
+        Returns:
+            positive_sample (list) : sampling된 positive sample index list
+            negative_sample (list) : sampling된 negative sample index list        
+        """        
+        positive_index = list()
+        negative_index = list()
+        
+        bbox_proposal = bbox_proposal.clone().detach().cpu().numpy() # [cx, cy, w, h]
+        target_bboxes = target_bboxes.clone().detach().cpu().numpy()
+        
+        bbox_proposal[:, :2] += bbox_proposal[:, 2:]/2 # [x, y, w, h]
+        bbox_proposal[:, 2:] += bbox_proposal[:, :2] # [x1, y1, x2, y2]
+        
+        target_bboxes[:, :2] += target_bboxes[:, 2:]/2
+        target_bboxes[:, 2:] += target_bboxes[:, :2]
+
+        _ious = ious(bbox_proposal, target_bboxes)
+        
+        for _iou in _ious:
+            positive = np.where(_iou > 0.7)
+            negative = np.where(_iou < 0.3)
+            if positive.shape[0] ==0 :
+                positive_index.append(np.argmax(_iou))
+            else :
+                positive_index.extend(positive.tolist())                
+            negative_index.extend(negative.tolist())
+        
+        negative_pedding = 0
+        
+        if len(positive_index) > 128:
+            positive_sample_index = np.random.choice(len(positive_index), random_choice, replace = False)
+        else :
+            positive_sample_index = positive_index
+            negative_pedding = random_choice - len(positive_index)
+            
+        negative_sample_index = np.random.choice(len(negative), random_choice + negative_pedding, replace = False)
+            
+        
+        return positive_sample_index, negative_sample_index
+    
+    def loss(self, 
+             positive_bbox_proposal : torch.Tensor, 
+             score_proposal : torch.Tensor,
+             anchor_bbox : torch.Tensor, 
+             target_bboxes : torch.Tensor,
+             target_scores : torch.Tensor,
+             positive_weight = 10)-> torch.Tensor:
+                
+        # score loss        
+        score_loss = F.cross_entropy(score_proposal, target_scores)
+        
+        
+        # regression loss
+        scale = anchor_bbox[:, 2:].clone()
+        
+        positive_bbox_proposal[:, 2:] = np.log(positive_bbox_proposal[:, 2:])
+        anchor_bbox[:, 2:] = np.log(anchor_bbox[:, 2:])
+        target_bboxes[:, 2:] = np.log(target_bboxes[:, 2:])
+        
+        t_pred = positive_bbox_proposal - anchor_bbox
+        t_true = target_bboxes - anchor_bbox
+        
+        t_pred[:, :2] /= scale
+        t_true[:, :2] /= scale
+        
+        regression_loss = F.smooth_l1_loss(t_pred, t_true)
+        
+        loss = score_loss + regression_loss * positive_weight
+        
+        return loss 
 
 
 class RegionProposal(nn.Module):
