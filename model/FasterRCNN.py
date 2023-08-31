@@ -58,7 +58,6 @@ class RPN(nn.Module):
         y_range = torch.range(0, img_height, img_height / (grid_height - 1))
         
         grid_x, grid_y = torch.meshgrid(x_range, y_range)
-        print(grid_x.shape, grid_y.shape)
         
         xy = torch.concat([grid_x.reshape(-1, 1), grid_y.reshape(-1, 1)], dim = -1)
         xy = xy.reshape(grid_height, grid_width, 2)
@@ -80,7 +79,8 @@ class RPN(nn.Module):
 
         return anchor_boxes
 
-    def forward(self, x):
+    def forward(self, x, img_size):
+        x = x.unsqueeze(0)
         batch = x.shape[0]
         grid_x = x.shape[-1]
         grid_y = x.shape[-2]
@@ -92,6 +92,8 @@ class RPN(nn.Module):
         bbox_proposal = bbox_proposal.view(batch, grid_y, grid_x, 9, 4)
         score_proposal = score_proposal.view(batch, grid_y, grid_x, 9, 2)
 
+        anchor_box = self.make_anchor_box(img_size, [grid_y, grid_x])
+        
         return bbox_proposal, score_proposal, anchor_box
     
     def pos_neg_sampling(self, bbox_proposal, target_bboxes, random_choice = 128):
@@ -119,35 +121,36 @@ class RPN(nn.Module):
         target_index = list()
         
         bbox_proposal = bbox_proposal.clone().detach().cpu().numpy() # [cx, cy, w, h]
-        target_bboxes = target_bboxes.clone().detach().cpu().numpy()
+        target_bboxes = target_bboxes.clone().detach().cpu().numpy() /600
         
         bbox_proposal[:, :2] += bbox_proposal[:, 2:]/2 # [x, y, w, h]
         bbox_proposal[:, 2:] += bbox_proposal[:, :2] # [x1, y1, x2, y2]
-        
         target_bboxes[:, :2] += target_bboxes[:, 2:]/2
         target_bboxes[:, 2:] += target_bboxes[:, :2]
 
-        _ious = ious(bbox_proposal, target_bboxes)
+        _ious = ious(target_bboxes ,bbox_proposal)
         
-        for i, _iou in enumerate(_ious):
-            positive, p_target = np.where(_iou > 0.7)
-            negative, _ = np.where(_iou < 0.3)
-            
-            if positive.shape[0] ==0 :
-                positive_index.append(i)
-                target_index.append(np.argmax(_iou))
-            else :
-                positive_index.extend(positive.tolist())
-                target_index.append(p_target)
-            negative_index.extend(negative.tolist())
+        target, positive = np.where(_ious > 0.7)
+        _, negative = np.where(_ious < 0.3)
         
-        negative_pedding = 0
+        target_index.extend(target)
+        positive_index.extend(positive)
+        negative_index.extend(negative)
+        #     if positive.shape[0] ==0 :
+        #         positive_index.append(i)
+        #         target_index.append(np.argmax(_iou))
+        #     else :
+        #         positive_index.extend(positive.tolist())
+        #         target_index.append(p_target)
+        #     negative_index.extend(negative.tolist())
         
-        if len(positive_index) > 128:
-            positive_sample_index = np.random.choice(len(positive_index), random_choice, replace = False)
-        else :
-            positive_sample_index = positive_index
-            negative_pedding = random_choice - len(positive_index)
+        # negative_pedding = 0
+        
+        # if len(positive_index) > 128:
+        #     positive_sample_index = np.random.choice(len(positive_index), random_choice, replace = False)
+        # else :
+        #     positive_sample_index = positive_index
+        #     negative_pedding = random_choice - len(positive_index)
             
         negative_sample_index = np.random.choice(len(negative), random_choice + negative_pedding, replace = False)
             
@@ -222,23 +225,27 @@ def train():
     grid_size = (25, 25)
     rpn = RPN(512, grid_size=grid_size).cuda()
 
-    img = cv2.imread("d:\\datasets\\VOCdevkit\\VOC2012\\JPEGImages\\2007_000925.jpg")
-    target_bboxes, target_labels = VOC_bbox("d:\\datasets\\VOCdevkit\\VOC2012\\Annotations\\2007_000925.xml")
-    target_bboxes = torch.tensor(target_bboxes).cuda()
-
+    img = cv2.imread("/home/kist/datasets/VOCdevkit/VOC2012/JPEGImages/2007_000925.jpg")
+        
     h, w, _ = img.shape
     scale = 600/min(h, w)
+
+    target_bboxes, target_labels = VOC_bbox("/home/kist/datasets/VOCdevkit/VOC2012/Annotations/2007_000925.xml")
+    target_bboxes = torch.tensor(target_bboxes).cuda()
+    target_bboxes[:, 2:] -= target_bboxes[:, :2]
+    target_bboxes /= scale
     
-    img = cv2.resize(img, (w/scale, h/scale))
-    
-    img = torch.tensor(img)
+    inputs_img = np.zeros([600, 600, 3])
+    img = cv2.resize(img, (int(w//scale), int(h//scale)))
+    inputs_img[:int(h//scale), :int(w//scale), :] = img
+    img = torch.tensor(inputs_img)
     img = img[:, :, [2, 1, 0]]/ 255.
-    img = img.permute(2, 0, 1) 
+    img = img.permute(2, 0, 1)
     
-    img = transforms.Normalize(mean, std)(img)
+    img = transforms.Normalize(mean, std)(img).float().cuda()
     
     vgg_feature = vgg(img)
-    bbox_proposal, score_proposal = rpn(vgg_feature)
+    bbox_proposal, score_proposal, anchor_box = rpn(vgg_feature, (600, 600))
     #bbox_proposal : [1, x_axis, y_axis, 9, 4]
     
     bbox_proposal = bbox_proposal.view(-1, 4)
@@ -251,14 +258,17 @@ def train():
     proposal_scores = torch.stack([score_proposal[pos_index], score_proposal[neg_index]])
     target_scores = torch.stack([torch.ones(len(pos_index)), torch.zeros(len(neg_index))])
     
-    loss = rpn.loss(pos_bbox, proposal_scores, anchor_bbox, tar_bbox, target_scores)
+    loss = rpn.loss(pos_bbox, proposal_scores, anchor_box, tar_bbox, target_scores)
+    
+    print(loss)
+    
     
 if __name__ == '__main__':
-    anchor_boxes = RPN.make_anchor_box([600, 600], [25, 25])
-    print(anchor_boxes.shape)
-    print(anchor_boxes[0, 0, :, :])
-    print(anchor_boxes[0, 1, :, :])
-    # train()
+    # anchor_boxes = RPN.make_anchor_box([600, 600], [25, 25])
+    # print(anchor_boxes.shape)
+    # print(anchor_boxes[0, 0, :, :])
+    # print(anchor_boxes[0, 1, :, :])
+    train()
     # # VGG16's feature map
     # vgg = vgg16(weights = torchvision.models.VGG16_Weights.IMAGENET1K_V1).features 
     
