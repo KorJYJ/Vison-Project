@@ -144,18 +144,21 @@ class RPN(nn.Module):
         #         target_index.append(p_target)
         #     negative_index.extend(negative.tolist())
         
-        # negative_pedding = 0
+        negative_pedding = 0
         
-        # if len(positive_index) > 128:
-        #     positive_sample_index = np.random.choice(len(positive_index), random_choice, replace = False)
-        # else :
-        #     positive_sample_index = positive_index
-        #     negative_pedding = random_choice - len(positive_index)
+        if len(positive_index) > 128:
+            positive_sample_index = np.random.choice(len(positive_index), random_choice, replace = False)
+        else :
+            positive_sample_index = positive_index
+            negative_pedding = random_choice - len(positive_index)
             
         negative_sample_index = np.random.choice(len(negative), random_choice + negative_pedding, replace = False)
-            
         
-        return positive_sample_index, negative_sample_index, target_index
+        print(positive_sample_index)
+        print(negative_sample_index)
+        target_index = np.array(target_index)
+        print(target_index[positive_sample_index])
+        return positive_sample_index, negative_sample_index, target_index[positive_sample_index]
     
     def loss(self, 
              positive_bbox_proposal : torch.Tensor, 
@@ -172,10 +175,12 @@ class RPN(nn.Module):
         # regression loss
         scale = anchor_bbox[:, 2:].clone()
         
-        positive_bbox_proposal[:, 2:] = np.log(positive_bbox_proposal[:, 2:])
-        anchor_bbox[:, 2:] = np.log(anchor_bbox[:, 2:])
-        target_bboxes[:, 2:] = np.log(target_bboxes[:, 2:])
+        positive_bbox_proposal[:, 2:] = torch.log(positive_bbox_proposal[:, 2:])
+        anchor_bbox[:, 2:] = torch.log(anchor_bbox[:, 2:])
+        target_bboxes[:, 2:] = torch.log(target_bboxes[:, 2:])
         
+        print(positive_bbox_proposal.shape, anchor_bbox.shape)
+
         t_pred = positive_bbox_proposal - anchor_bbox
         t_true = target_bboxes - anchor_bbox
         
@@ -201,7 +206,6 @@ class RegionProposal(nn.Module):
 class MyFasterRCNN(nn.Module):
     def __init__(self, n_classes):
         super(MyFasterRCNN, self).__init__()
-
         self.fc_layer = nn.Sequential(
             nn.Linear(25088, 4096),
             nn.BatchNorm1d(4096),
@@ -225,12 +229,12 @@ def train():
     grid_size = (25, 25)
     rpn = RPN(512, grid_size=grid_size).cuda()
 
-    img = cv2.imread("/home/kist/datasets/VOCdevkit/VOC2012/JPEGImages/2007_000925.jpg")
+    img = cv2.imread("D:\\datasets\\VOCdevkit\\VOC2012\\JPEGImages\\2007_004538.jpg")
         
     h, w, _ = img.shape
     scale = 600/min(h, w)
 
-    target_bboxes, target_labels = VOC_bbox("/home/kist/datasets/VOCdevkit/VOC2012/Annotations/2007_000925.xml")
+    target_bboxes, target_labels = VOC_bbox("D:\\datasets\\VOCdevkit\\VOC2012\\Annotations\\2007_004538.xml")
     target_bboxes = torch.tensor(target_bboxes).cuda()
     target_bboxes[:, 2:] -= target_bboxes[:, :2]
     target_bboxes /= scale
@@ -255,9 +259,20 @@ def train():
     
     pos_bbox = bbox_proposal[pos_index]
     tar_bbox = target_bboxes[target_index]
-    proposal_scores = torch.stack([score_proposal[pos_index], score_proposal[neg_index]])
-    target_scores = torch.stack([torch.ones(len(pos_index)), torch.zeros(len(neg_index))])
+
+    print(pos_bbox.shape, tar_bbox.shape)
+    proposal_scores = torch.concat([score_proposal[pos_index], score_proposal[neg_index]], dim=0)
+
+    positive_target_scores = torch.zeros([len(pos_index), 2])
+    positive_target_scores[:, 0] +=1
+    negative_target_scores = torch.zeros([len(target_index), 2])
+    negative_target_scores[:, 1] += 1
+
+
+    target_scores = torch.concat([positive_target_scores, negative_target_scores], dim = 0).cuda()
     
+    print(proposal_scores.shape, target_scores.shape)
+
     loss = rpn.loss(pos_bbox, proposal_scores, anchor_box, tar_bbox, target_scores)
     
     print(loss)
