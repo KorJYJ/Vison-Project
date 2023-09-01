@@ -31,8 +31,9 @@ class VGG16(nn.Module):
     
 
 class RPN(nn.Module):
-    def __init__(self, in_ch, grid_size):
+    def __init__(self, in_ch):
         super(RPN, self).__init__()
+
         self.conv = nn.Sequential(
             ConvBlock(in_ch, in_ch, kernel_size=3, stride=1, padding='same'),
             nn.ReLU()
@@ -48,6 +49,7 @@ class RPN(nn.Module):
     
     @staticmethod
     def make_anchor_box(image_size, grid_size):
+        "return x1, y1, x2, y2"
         anchor_bbox_area = [128*128, 256*256, 512*512]
         anchor_bbox_ratio = [[1, 1], [2, 1], [1, 2]]
         
@@ -76,118 +78,98 @@ class RPN(nn.Module):
                 anchor_list.append(xywh)
                 
         anchor_boxes = torch.concat(anchor_list, dim = 2)
-
+        anchor_boxes[..., 2:] += anchor_boxes[..., :2]
         return anchor_boxes
+    
+    
+    def pos_neg_sampling(self, anchor, target, random_choice = 128):
+        anchor = anchor.clone().cpu().numpy()
+        target = target.clone().cpu().numpy()
+        
+        # 이미지 밖으로 box가 나자기 않도록 만들기
 
-    def forward(self, x, img_size):
+        _ious = ious(target, anchor)
+
+        pos_target, pos_anc = np.where(_ious > 0.7)
+        _, neg_anc = np.where(_ious < 0.3)
+
+        if len(pos_anc) > 128:
+            positive_sample_index = np.random.choice(range(len(pos_anc)), random_choice, replace = False)
+        else :
+            positive_sample_index = np.arange(len(pos_anc))
+            negative_pedding = random_choice - len(pos_anc)
+            
+        negative_sample_index = np.random.choice(range(len(neg_anc)), random_choice + negative_pedding, replace = False)
+
+        return pos_target[positive_sample_index], pos_anc[positive_sample_index], neg_anc[negative_sample_index]
+
+    
+    def forward(self, x, img_size, target = None):
         x = x.unsqueeze(0)
         batch = x.shape[0]
         grid_x = x.shape[-1]
         grid_y = x.shape[-2]
         
         x = self.conv(x)
-        bbox_proposal = self.bbox_layer(x)
-        score_proposal = self.score_layer(x)
+        bbox_regressor = self.bbox_layer(x) # dx, dy, dw, dh || [gird_y, grid_x, 9 * 4]
+        score_proposal = self.score_layer(x) # [gird_y, grid_x, 9 * 2]
 
-        bbox_proposal = bbox_proposal.view(batch, grid_y, grid_x, 9, 4)
+        bbox_regressor = bbox_regressor.view(batch, grid_y, grid_x, 9, 4)
         score_proposal = score_proposal.view(batch, grid_y, grid_x, 9, 2)
+        anchor_box = self.make_anchor_box(img_size, [grid_y, grid_x]).cuda()
 
-        anchor_box = self.make_anchor_box(img_size, [grid_y, grid_x])
-        
-        return bbox_proposal, score_proposal, anchor_box
-    
-    def pos_neg_sampling(self, bbox_proposal, target_bboxes, random_choice = 128):
-        """
-        1. Positive Sample
-            1) anchor bboxes_regressor와 target bboxes의 IoU가 가장 큰것
-            2) anchor bboxes regressor와 target bboxes의 IoU가 0.7 이상인 것
+        loss = None
 
-        2. Negative Sample
-            1) anchor bboxes regressor와 target bboxe의 IoU가 0.3 이하인 것
+        if target is not None:
+            anchor_box = anchor_box.view(-1, 4)
+            target = target.view(-1, 4)
+            bbox_regressor = bbox_regressor.view(-1, 4)
+            score_proposal = score_proposal.view(-1, 2)
+
+            pos_taget_idx, pos_anc_idx, neg_anc_idx = self.pos_neg_sampling(anchor_box, target)
             
-        Positive sample과 Negative sample에서 128:128로 샘플링
-        여기서 만약 Positive sample의 개수가 부족하다면 Negative Sample로 추가
-        
-        Args:
-            bbox_proposal (torch.Tensor): anchor_bboxes_regressor
-            target_bboxes (torch.Tensor): target box
-        
-        Returns:
-            positive_sample (list) : sampling된 positive sample index list
-            negative_sample (list) : sampling된 negative sample index list        
-        """        
-        positive_index = list()
-        negative_index = list()
-        target_index = list()
-        
-        bbox_proposal = bbox_proposal.clone().detach().cpu().numpy() # [cx, cy, w, h]
-        target_bboxes = target_bboxes.clone().detach().cpu().numpy() /600
-        
-        bbox_proposal[:, :2] += bbox_proposal[:, 2:]/2 # [x, y, w, h]
-        bbox_proposal[:, 2:] += bbox_proposal[:, :2] # [x1, y1, x2, y2]
-        target_bboxes[:, :2] += target_bboxes[:, 2:]/2
-        target_bboxes[:, 2:] += target_bboxes[:, :2]
+            pos_neg_idx = np.concatenate([pos_anc_idx, neg_anc_idx])
 
-        _ious = ious(target_bboxes ,bbox_proposal)
-        
-        target, positive = np.where(_ious > 0.7)
-        _, negative = np.where(_ious < 0.3)
-        
-        target_index.extend(target)
-        positive_index.extend(positive)
-        negative_index.extend(negative)
-        #     if positive.shape[0] ==0 :
-        #         positive_index.append(i)
-        #         target_index.append(np.argmax(_iou))
-        #     else :
-        #         positive_index.extend(positive.tolist())
-        #         target_index.append(p_target)
-        #     negative_index.extend(negative.tolist())
-        
-        negative_pedding = 0
-        
-        if len(positive_index) > 128:
-            positive_sample_index = np.random.choice(len(positive_index), random_choice, replace = False)
-        else :
-            positive_sample_index = positive_index
-            negative_pedding = random_choice - len(positive_index)
-            
-        negative_sample_index = np.random.choice(len(negative), random_choice + negative_pedding, replace = False)
-        
-        print(positive_sample_index)
-        print(negative_sample_index)
-        target_index = np.array(target_index)
-        print(target_index[positive_sample_index])
-        return positive_sample_index, negative_sample_index, target_index[positive_sample_index]
-    
-    def loss(self, 
-             positive_bbox_proposal : torch.Tensor, 
-             score_proposal : torch.Tensor,
-             anchor_bbox : torch.Tensor, 
-             target_bboxes : torch.Tensor,
+            bbox_regressor = bbox_regressor[pos_anc_idx]
+            score_proposal = score_proposal[pos_neg_idx]
+            pos_anchor_box = anchor_box[pos_anc_idx]
+            target = target[pos_taget_idx]
+            target_scores = torch.zeros_like(score_proposal)
+            target_scores[:len(pos_anc_idx), 0] = 1
+            target_scores[len(pos_anc_idx):, 1] = 1
+
+            target_regressor = self.box_encode(pos_anchor_box, target)
+
+            loss = self.compute_loss(bbox_regressor, score_proposal, target_regressor, target_scores)
+
+        return loss
+
+    def box_encode(self, anchor, bbox):
+        anchor[:, 2:] -= anchor[:, :2] # [x, y, w, h]
+        bbox[:, 2:] -= bbox[:, :2] # [x, y, w, h]
+
+        anchor[:, :2] += anchor[:, 2:]/2 # [cx, cy, w, h]
+        bbox[:, :2] += bbox[:, 2:]/2 # [cx, cy, w, h]
+
+        dx = (bbox[:, 0:1]- anchor[:, 0:1]) / anchor[:, 2:3]
+        dy = (bbox[:, 1:2]- anchor[:, 1:2]) / anchor[:, 3:4]
+        dw = torch.log(bbox[:, 2:3]/anchor[:, 2:3])
+        dh = torch.log(bbox[:, 3:4]/anchor[:, 3:4])
+        target_regressor = torch.concat([dx, dy, dw, dh], dim = 1)
+        return target_regressor
+
+    def compute_loss(self, 
+             bbox_regressor : torch.Tensor, 
+             scores : torch.Tensor,
+             target_regressor : torch.Tensor, 
              target_scores : torch.Tensor,
              positive_weight = 10)-> torch.Tensor:
                 
         # score loss        
-        score_loss = F.cross_entropy(score_proposal, target_scores)
-        
+        score_loss = F.cross_entropy(scores, target_scores)        
         
         # regression loss
-        scale = anchor_bbox[:, 2:].clone()
-        
-        positive_bbox_proposal[:, 2:] = torch.log(positive_bbox_proposal[:, 2:])
-        anchor_bbox[:, 2:] = torch.log(anchor_bbox[:, 2:])
-        target_bboxes[:, 2:] = torch.log(target_bboxes[:, 2:])
-        
-        print(positive_bbox_proposal.shape, anchor_bbox.shape)
-
-        t_pred = positive_bbox_proposal - anchor_bbox
-        t_true = target_bboxes - anchor_bbox
-        
-        t_pred[:, :2] /= scale
-        t_true[:, :2] /= scale
-        
-        regression_loss = F.smooth_l1_loss(t_pred, t_true)
+        regression_loss = F.smooth_l1_loss(bbox_regressor, target_regressor)
         
         loss = score_loss + positive_weight * regression_loss
         
@@ -226,8 +208,9 @@ def train():
     mean = [0.485, 0.456, 0.406]
     std = [0.229, 0.224, 0.225]
     vgg = vgg16(weights = torchvision.models.VGG16_Weights.IMAGENET1K_V1).features.cuda()
-    grid_size = (25, 25)
-    rpn = RPN(512, grid_size=grid_size).cuda()
+    rpn = RPN(512).cuda()
+
+    faster_rcnn = nn.ModuleList([vgg, rpn])
 
     img = cv2.imread("D:\\datasets\\VOCdevkit\\VOC2012\\JPEGImages\\2007_004538.jpg")
         
@@ -236,46 +219,54 @@ def train():
 
     target_bboxes, target_labels = VOC_bbox("D:\\datasets\\VOCdevkit\\VOC2012\\Annotations\\2007_004538.xml")
     target_bboxes = torch.tensor(target_bboxes).cuda()
-    target_bboxes[:, 2:] -= target_bboxes[:, :2]
-    target_bboxes /= scale
+    # target_bboxes[:, 2:] -= target_bboxes[:, :2]
+    target_bboxes *= scale
     
-    inputs_img = np.zeros([600, 600, 3])
-    img = cv2.resize(img, (int(w//scale), int(h//scale)))
-    inputs_img[:int(h//scale), :int(w//scale), :] = img
-    img = torch.tensor(inputs_img)
+    
+    img = cv2.resize(img, (int(w*scale), int(h*scale)))
+    h, w, _ = img.shape
+    img = torch.tensor(img)
     img = img[:, :, [2, 1, 0]]/ 255.
     img = img.permute(2, 0, 1)
     
     img = transforms.Normalize(mean, std)(img).float().cuda()
+
+    optimizer  = torch.optim.SGD(faster_rcnn.parameters(), lr = 1e-4, momentum=0.9)
     
-    vgg_feature = vgg(img)
-    bbox_proposal, score_proposal, anchor_box = rpn(vgg_feature, (600, 600))
+
+    for epoch in range(50):
+        vgg_feature = vgg(img)
+        loss = rpn(vgg_feature, (h, w), target_bboxes)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        print(f"{epoch} : loss={loss}")
     #bbox_proposal : [1, x_axis, y_axis, 9, 4]
     
-    bbox_proposal = bbox_proposal.view(-1, 4)
-    score_proposal = score_proposal.view(-1, 2)
+    # bbox_proposal = bbox_proposal.view(-1, 4)
+    # score_proposal = score_proposal.view(-1, 2)
     
-    pos_index, neg_index, target_index = rpn.pos_neg_sampling(bbox_proposal=bbox_proposal, target_bboxes=target_bboxes)
+    # pos_index, neg_index, target_index = rpn.pos_neg_sampling(bbox_proposal=bbox_proposal, target_bboxes=target_bboxes)
     
-    pos_bbox = bbox_proposal[pos_index]
-    tar_bbox = target_bboxes[target_index]
+    # pos_bbox = bbox_proposal[pos_index]
+    # tar_bbox = target_bboxes[target_index]
 
-    print(pos_bbox.shape, tar_bbox.shape)
-    proposal_scores = torch.concat([score_proposal[pos_index], score_proposal[neg_index]], dim=0)
+    # print(pos_bbox.shape, tar_bbox.shape)
+    # proposal_scores = torch.concat([score_proposal[pos_index], score_proposal[neg_index]], dim=0)
 
-    positive_target_scores = torch.zeros([len(pos_index), 2])
-    positive_target_scores[:, 0] +=1
-    negative_target_scores = torch.zeros([len(target_index), 2])
-    negative_target_scores[:, 1] += 1
+    # positive_target_scores = torch.zeros([len(pos_index), 2])
+    # positive_target_scores[:, 0] +=1
+    # negative_target_scores = torch.zeros([len(target_index), 2])
+    # negative_target_scores[:, 1] += 1
 
 
-    target_scores = torch.concat([positive_target_scores, negative_target_scores], dim = 0).cuda()
+    # target_scores = torch.concat([positive_target_scores, negative_target_scores], dim = 0).cuda()
     
-    print(proposal_scores.shape, target_scores.shape)
+    # print(proposal_scores.shape, target_scores.shape)
 
-    loss = rpn.loss(pos_bbox, proposal_scores, anchor_box, tar_bbox, target_scores)
+    # loss = rpn.loss(pos_bbox, proposal_scores, anchor_box, tar_bbox, target_scores)
     
-    print(loss)
+    # print(loss)
     
     
 if __name__ == '__main__':
