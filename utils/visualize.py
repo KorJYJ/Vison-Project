@@ -11,8 +11,8 @@ def visualize_bbox(image, bboxes, labels, scores):
     return image
 
 
-img = cv2.imread("d:\\datasets\\VOCdevkit\\VOC2012\\JPEGImages\\2007_000925.jpg")
-bboxes, labels = VOC_bbox("d:\\datasets\\VOCdevkit\\VOC2012\\Annotations\\2007_000925.xml")
+img = cv2.imread("/home/kist/datasets/VOCdevkit/VOC2012/JPEGImages/2007_002597.jpg")
+bboxes, labels = VOC_bbox("/home/kist/datasets/VOCdevkit/VOC2012/Annotations/2007_002597.xml")
 scores = [100] * len(bboxes)
 print(bboxes, labels)
 
