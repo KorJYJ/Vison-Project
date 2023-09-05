@@ -392,6 +392,10 @@ def train():
         rois, targets = roi_pool(vgg_feature, region_proposal, (h, w), targets)
         b_class, bbox, loss = roi_head(rois, (h, w), targets)
         
+        
+        # freezing vgg
+        
+        # freezing vgg & rpn
         print(loss)
         print(bbox)
 
