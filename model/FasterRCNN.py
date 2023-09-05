@@ -350,7 +350,6 @@ def train():
     rpn = RPN(512).cuda()
     roi_pool = RoIPool((2, 2)).cuda()
     roi_head = MyFasterRCNN(2).cuda()
-    faster_rcnn = nn.ModuleList([vgg, rpn])
 
     img = cv2.imread("D:\\datasets\\VOCdevkit\\VOC2012\\JPEGImages\\2007_002597.jpg")
         
@@ -372,10 +371,21 @@ def train():
     img = img.permute(2, 0, 1)
     
     img = transforms.Normalize(mean, std)(img).float().cuda()
+    
+    faster_rcnn = nn.ModuleList([vgg, rpn])
 
-    optimizer  = torch.optim.Adam(faster_rcnn.parameters(), lr = 1e-4)
+    optimizer_1  = torch.optim.Adam(nn.ModuleList([vgg, rpn]).parameters(), lr = 1e-4)
+    optimizer_2  = torch.optim.Adam(nn.ModuleList([vgg, roi_pool, roi_head]).parameters(), lr = 1e-4)
+    optimizer_3  = torch.optim.Adam(rpn.parameters(), lr = 1e-4)
+    optimizer_4  = torch.optim.Adam(nn.ModuleList([roi_pool, roi_head]).parameters(), lr = 1e-4)
+    
     
     for epoch in range(800):
+        vgg.train()
+        rpn.train()
+        roi_pool.train()
+        roi_head.train()
+        
         targets = {
             'box': copy.deepcopy(target_bboxes),
             'class' : copy.deepcopy(target_labels)
@@ -384,22 +394,71 @@ def train():
         region_proposal, scores, loss = rpn(vgg_feature, (h, w), targets['box'])
         
         loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+        optimizer_1.step()
+        optimizer_1.zero_grad()
         print(f"{epoch} : loss={loss}, proposal : {region_proposal.shape}")
 
         # freezing rpn
+        for layer in rpn.parameters():
+            layer.requires_grad = False
+        targets = {
+            'box': copy.deepcopy(target_bboxes),
+            'class' : copy.deepcopy(target_labels)
+        }
+        vgg_feature = vgg(img)
+        region_proposal, _, _ = rpn(vgg_feature, (h, w))
+            
         rois, targets = roi_pool(vgg_feature, region_proposal, (h, w), targets)
         b_class, bbox, loss = roi_head(rois, (h, w), targets)
         
+        loss.backward()
+        optimizer_2.step()
+        optimizer_2.zero_grad()
         
         # freezing vgg
+        for layer in vgg.parameters():
+            layer.requires_grad = False
+        
+        for layer in roi_head.parameters():
+            layer.requires_grad = False
+            
+        for layer in roi_pool.parameters():
+            layer.requires_grad = False
+            
+        rpn.train()
+
+        targets = {
+            'box': copy.deepcopy(target_bboxes),
+            'class' : copy.deepcopy(target_labels)
+        }
+        vgg_feature = vgg(img)
+        region_proposal, _, loss = rpn(vgg_feature, (h, w))
+        
+        loss.backward()
+        optimizer_3.step()
+        optimizer_3.zero_grad()
         
         # freezing vgg & rpn
-        print(loss)
-        print(bbox)
-
-
+        for layer in rpn.parameters():
+            layer.requires_grad = False
+            
+        roi_pool.train()
+        roi_head.train()
+        
+        targets = {
+            'box': copy.deepcopy(target_bboxes),
+            'class' : copy.deepcopy(target_labels)
+        }
+        vgg_feature = vgg(img)
+        region_proposal, _, _ = rpn(vgg_feature, (h, w))
+            
+        rois, targets = roi_pool(vgg_feature, region_proposal, (h, w), targets)
+        b_class, bbox, loss = roi_head(rois, (h, w), targets)
+        
+        loss.backward()
+        optimizer_4.step()
+        optimizer_4.zero_grad()
+        
 
     #bbox_proposal : [1, x_axis, y_axis, 9, 4]
     
