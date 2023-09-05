@@ -128,25 +128,26 @@ class RPN(nn.Module):
         loss = None
 
         if self.training:
-            target = target.view(-1, 4)
-            # bbox_regressor = bbox_regressor.view(-1, 4)
-            # score_proposal = score_proposal.view(-1, 2)
+            if target is not None:
+                target = target.view(-1, 4)
+                # bbox_regressor = bbox_regressor.view(-1, 4)
+                # score_proposal = score_proposal.view(-1, 2)
 
-            pos_taget_idx, pos_anc_idx, neg_anc_idx = self.pos_neg_sampling(anchor_box, target)
-            
-            pos_neg_idx = np.concatenate([pos_anc_idx, neg_anc_idx])
+                pos_taget_idx, pos_anc_idx, neg_anc_idx = self.pos_neg_sampling(anchor_box, target)
+                
+                pos_neg_idx = np.concatenate([pos_anc_idx, neg_anc_idx])
 
-            bbox_regressor = bbox_regressor[pos_anc_idx]
-            score_proposal = score_proposal[pos_neg_idx]
-            pos_anchor_box = anchor_box[pos_anc_idx]
-            target = target[pos_taget_idx]
+                bbox_regressor = bbox_regressor[pos_anc_idx]
+                score_proposal = score_proposal[pos_neg_idx]
+                pos_anchor_box = anchor_box[pos_anc_idx]
+                target = target[pos_taget_idx]
 
-            target_scores = torch.zeros_like(score_proposal)
-            target_scores[:len(pos_anc_idx), 0] = 1
-            target_scores[len(pos_anc_idx):, 1] = 1
-            target_regressor = self.box_encode(pos_anchor_box, target)
+                target_scores = torch.zeros_like(score_proposal)
+                target_scores[:len(pos_anc_idx), 0] = 1
+                target_scores[len(pos_anc_idx):, 1] = 1
+                target_regressor = self.box_encode(pos_anchor_box, target)
 
-            loss = self.compute_loss(bbox_regressor, score_proposal, target_regressor, target_scores)
+                loss = self.compute_loss(bbox_regressor, score_proposal, target_regressor, target_scores)
 
         return bbox, scores, loss
 
@@ -306,11 +307,11 @@ class RoIPool(nn.Module):
         super(RoIPool, self).__init__()
         self.max_pool = nn.AdaptiveMaxPool2d(output_size)
         
-    def make_target(self, rois, targets):
-        rois_copy = rois.clone().detach().cpu().numpy()
+    def make_target(self, boxes, rois, targets):
+        boxes = boxes.clone().detach().cpu().numpy()
         target_copy = targets['box'].clone().detach().cpu().numpy()
-        
-        _ious = ious(target_copy, rois_copy)
+        print(boxes.shape, target_copy.shape)
+        _ious = ious(target_copy, boxes)
         
         targets_idx, rois_idx = np.where(_ious > 0.7)
         
@@ -322,15 +323,17 @@ class RoIPool(nn.Module):
         
 
     def forward(self, feature, boxes, image_size, targets = None):
+        print(boxes.shape)
         image_height, image_width = image_size
 
         feature_height, feature_width = feature.shape[-2], feature.shape[-1]
         output = []
         # boxes[:, :2] -= boxes[:, 2:] / 2
         # boxes[:, 2:] += boxes[:, :2]
-        boxes[:, [0, 2]] *= feature_width/image_width
-        boxes[:, [1, 3]] *= feature_height/image_height
-        for box in boxes:
+        scaled_boxes = boxes.clone()
+        scaled_boxes[:, [0, 2]] *= feature_width/image_width
+        scaled_boxes[:, [1, 3]] *= feature_height/image_height
+        for box in scaled_boxes:
             x1, y1, x2, y2 = box.int()
             output.append(self.max_pool(feature[..., y1: y2, x1:x2]))
 
@@ -339,7 +342,7 @@ class RoIPool(nn.Module):
         
         if self.training:
             if targets is not None:
-                rois, targets = self.make_target(rois, targets)
+                rois, targets = self.make_target(boxes, rois, targets)
 
         return rois, targets
 
@@ -351,14 +354,14 @@ def train():
     roi_pool = RoIPool((2, 2)).cuda()
     roi_head = MyFasterRCNN(2).cuda()
 
-    img = cv2.imread("D:\\datasets\\VOCdevkit\\VOC2012\\JPEGImages\\2007_002597.jpg")
+    img = cv2.imread("/home/kist/datasets/VOCdevkit/VOC2012/JPEGImages/2007_002597.jpg")
         
     h, w, _ = img.shape
     scale = 600/min(h, w)
 
-    target_bboxes, target_classes = VOC_bbox("D:\\datasets\\VOCdevkit\\VOC2012\\Annotations\\2007_002597.xml")
+    target_bboxes, target_classes = VOC_bbox("/home/kist/datasets/VOCdevkit/VOC2012/Annotations/2007_002597.xml")
     target_labels = torch.tensor([[0, 1],
-                                  [1, 0]])
+                                  [1, 0]]).float().cuda()
     target_bboxes = torch.tensor(target_bboxes).cuda()
     # target_bboxes[:, 2:] -= target_bboxes[:, :2]
     target_bboxes *= scale
@@ -372,7 +375,6 @@ def train():
     
     img = transforms.Normalize(mean, std)(img).float().cuda()
     
-    faster_rcnn = nn.ModuleList([vgg, rpn])
 
     optimizer_1  = torch.optim.Adam(nn.ModuleList([vgg, rpn]).parameters(), lr = 1e-4)
     optimizer_2  = torch.optim.Adam(nn.ModuleList([vgg, roi_pool, roi_head]).parameters(), lr = 1e-4)
@@ -385,6 +387,18 @@ def train():
         rpn.train()
         roi_pool.train()
         roi_head.train()
+        
+        for layer in vgg.parameters():
+            layer.requires_grad = False
+        
+        for layer in roi_head.parameters():
+            layer.requires_grad = False
+            
+        for layer in roi_pool.parameters():
+            layer.requires_grad = False
+            
+        for layer in rpn.parameters():
+            layer.requires_grad = True        
         
         targets = {
             'box': copy.deepcopy(target_bboxes),
@@ -399,16 +413,28 @@ def train():
         print(f"{epoch} : loss={loss}, proposal : {region_proposal.shape}")
 
         # freezing rpn
+        for layer in vgg.parameters():
+            layer.requires_grad = False
+        
+        for layer in roi_head.parameters():
+            layer.requires_grad = True
+            
+        for layer in roi_pool.parameters():
+            layer.requires_grad = True
+            
         for layer in rpn.parameters():
             layer.requires_grad = False
+            
+
         targets = {
             'box': copy.deepcopy(target_bboxes),
             'class' : copy.deepcopy(target_labels)
         }
         vgg_feature = vgg(img)
-        region_proposal, _, _ = rpn(vgg_feature, (h, w))
+        region_proposal, scores, loss = rpn(vgg_feature, (h, w), targets['box'])
             
         rois, targets = roi_pool(vgg_feature, region_proposal, (h, w), targets)
+        print(rois.shape)
         b_class, bbox, loss = roi_head(rois, (h, w), targets)
         
         loss.backward()
@@ -425,20 +451,30 @@ def train():
         for layer in roi_pool.parameters():
             layer.requires_grad = False
             
-        rpn.train()
-
+        for layer in rpn.parameters():
+            layer.requires_grad = True
+        
         targets = {
             'box': copy.deepcopy(target_bboxes),
             'class' : copy.deepcopy(target_labels)
         }
         vgg_feature = vgg(img)
-        region_proposal, _, loss = rpn(vgg_feature, (h, w))
+        region_proposal, _, loss = rpn(vgg_feature, (h, w), targets['box'])
         
         loss.backward()
         optimizer_3.step()
         optimizer_3.zero_grad()
         
         # freezing vgg & rpn
+        for layer in vgg.parameters():
+            layer.requires_grad = False
+        
+        for layer in roi_head.parameters():
+            layer.requires_grad = True
+            
+        for layer in roi_pool.parameters():
+            layer.requires_grad = True
+            
         for layer in rpn.parameters():
             layer.requires_grad = False
             
