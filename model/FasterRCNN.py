@@ -19,20 +19,21 @@ from utils.anchor import make_anchor_box
 from utils.bbox import VOC_bbox
 from utils.iou import ious
 
+from typing import Union, List, Tuple
+
 class VGG16(nn.Module):
     def __init__(self, weights = torchvision.models.VGG16_Weights.IMAGENET1K_V1):
         super(VGG16, self).__int__()
         self.vgg = vgg16(weights = weights).features
 
     def forward(self, x : torch.Tensor) ->  torch.Tensor:
-        x = x.unsqueeze(0)
         feature = self.vgg(x)
 
         return feature
     
 
 class RPN(nn.Module):
-    def __init__(self, in_ch):
+    def __init__(self, in_ch : int):
         super(RPN, self).__init__()
 
         self.conv = nn.Sequential(
@@ -49,7 +50,8 @@ class RPN(nn.Module):
         )
     
     @staticmethod
-    def make_anchor_box(image_size, grid_size):
+    def make_anchor_box(image_size,
+                        grid_size):
         "return x1, y1, x2, y2"
         anchor_bbox_area = [128*128, 256*256, 512*512]
         anchor_bbox_ratio = [[1, 1], [2, 1], [1, 2]]
@@ -59,11 +61,12 @@ class RPN(nn.Module):
         
         x_range = torch.range(0, img_width, img_width / grid_width / 2)[range(1, grid_width * 2, 2)]
         y_range = torch.range(0, img_height, img_height / grid_height / 2)[range(1, grid_height * 2, 2)]
-        
         grid_x, grid_y = torch.meshgrid(x_range, y_range)
+        
         
         xy = torch.concat([grid_x.reshape(-1, 1), grid_y.reshape(-1, 1)], dim = -1)
         xy = xy.reshape(grid_height, grid_width, 2)
+        
         
         anchor_list = []
         
@@ -83,10 +86,13 @@ class RPN(nn.Module):
         anchor_boxes[..., 1] -= anchor_boxes[..., 3] / 2
 
         anchor_boxes[..., 2:] += anchor_boxes[..., :2]
+        
+        
         return anchor_boxes
     
     
-    def pos_neg_sampling(self, anchor, target, random_choice = 128):
+    def pos_neg_sampling(self, anchor:torch.Tensor, target:torch.Tensor, random_choice:int = 128):
+        
         anchor = anchor.clone().cpu().numpy()
         target = target.clone().cpu().numpy()
         
@@ -106,25 +112,21 @@ class RPN(nn.Module):
 
     
     def forward(self, x, img_size, target = None):
-        x = x.unsqueeze(0)
         batch = x.shape[0]
         grid_x = x.shape[-1]
         grid_y = x.shape[-2]
         height, width = img_size
         x = self.conv(x)
         bbox_regressor = self.bbox_layer(x) # dx, dy, dw, dh || [gird_y, grid_x, 9 * 4]
-        score_proposal = self.score_layer(x) # [gird_y, grid_x, 9 * 2]
+        objectness = self.score_layer(x) # [gird_y, grid_x, 9 * 2]
 
-        # bbox_regressor = bbox_regressor.view(batch, grid_y, grid_x, 9, 4)
-        # score_proposal = score_proposal.view(batch, grid_y, grid_x, 9, 2)
-
-        bbox_regressor = bbox_regressor.view(-1, 4)
-        score_proposal = score_proposal.view(-1, 2)
+        bbox_regressor = bbox_regressor.view(-1, 4) # dcx, dcy, dw, dh
+        objectness = objectness.view(-1, 2) # objectness
         anchor_box = self.make_anchor_box(img_size, [grid_y, grid_x]).cuda()
         anchor_box = anchor_box.view(-1, 4)
-
-        bbox =self.box_decoder(bbox_regressor, anchor_box)
-        bbox, scores = self.proposal_filter(bbox, score_proposal, img_size)
+        bbox =self.box_decoder(bbox_regressor, anchor_box) # [dcx, dcy, dw, dh] + anchor = cx, cy, w, h
+        bbox, objectness_bbox = self.proposal_filter(bbox, objectness, img_size)
+        
         loss = None
 
         if self.training:
@@ -132,24 +134,23 @@ class RPN(nn.Module):
                 target = target.view(-1, 4)
                 # bbox_regressor = bbox_regressor.view(-1, 4)
                 # score_proposal = score_proposal.view(-1, 2)
-
-                pos_taget_idx, pos_anc_idx, neg_anc_idx = self.pos_neg_sampling(anchor_box, target)
                 
+                # RPN 학습을 위해서 1:1 비율로 샘플링
+                pos_target_idx, pos_anc_idx, neg_anc_idx = self.pos_neg_sampling(anchor_box, target)
                 pos_neg_idx = np.concatenate([pos_anc_idx, neg_anc_idx])
 
                 bbox_regressor = bbox_regressor[pos_anc_idx]
-                score_proposal = score_proposal[pos_neg_idx]
                 pos_anchor_box = anchor_box[pos_anc_idx]
-                target = target[pos_taget_idx]
+                objectness = objectness[pos_neg_idx] # positive, negative objectness
 
-                target_scores = torch.zeros_like(score_proposal)
-                target_scores[:len(pos_anc_idx), 0] = 1
-                target_scores[len(pos_anc_idx):, 1] = 1
+                target = target[pos_target_idx]
+                target_objectness = torch.zeros_like(objectness)
+                target_objectness[:len(pos_anc_idx), 0] = 1
+                target_objectness[len(pos_anc_idx):, 1] = 1
                 target_regressor = self.box_encode(pos_anchor_box, target)
 
-                loss = self.compute_loss(bbox_regressor, score_proposal, target_regressor, target_scores)
-
-        return bbox, scores, loss
+                loss = self.compute_loss(bbox_regressor, objectness, target_regressor, target_objectness)
+        return bbox, objectness_bbox, loss
 
     def box_encode(self, bbox, anchor):
         anchor[:, 2:] -= anchor[:, :2] # [x, y, w, h]
@@ -202,6 +203,7 @@ class RPN(nn.Module):
         proposals[..., [0, 2]] = torch.clamp(proposals[..., [0, 2]], max=width)
         proposals[..., [0, 2]] = torch.clamp(proposals[..., [0, 2]], min=0)
         
+        # 작은 스코어 제거
         keep = scores[:, 0] > 0.2
         proposals = proposals[keep]
         scores = scores[keep]
@@ -213,6 +215,7 @@ class RPN(nn.Module):
         proposals = proposals[keep]
         scores = scores[keep]
 
+        # NMS
         nms_index = torchvision.ops.nms(proposals, scores[:, 0], iou_threshold= 0.7)
         nms_index = nms_index[:2000]
 
@@ -239,16 +242,6 @@ class RPN(nn.Module):
         
         return loss 
 
-
-class RegionProposal(nn.Module):
-    def __init__(self):
-        super(RegionProposal, self).__init__()
-
-    def forward(self, anchor, bbox_regressor):
-        bboxes = anchor * bbox_regressor
-        bbxoes = bboxes.float()
-        return bbxoes
-
 class MyFasterRCNN(nn.Module):
     def __init__(self, n_classes):
         super(MyFasterRCNN, self).__init__()
@@ -266,7 +259,6 @@ class MyFasterRCNN(nn.Module):
         self.bounding_box = nn.Linear(512, 4)
 
 
-        
         
     def forward(self, x, image_size = None, target = None):
         batch = x.shape[0]
@@ -305,39 +297,44 @@ class MyFasterRCNN(nn.Module):
 class RoIPool(nn.Module):
     def __init__(self, output_size):
         super(RoIPool, self).__init__()
-        self.max_pool = nn.AdaptiveMaxPool2d(output_size)
+        # self.max_pool = nn.AdaptiveMaxPool2d(output_size)
+        self.output_size = output_size
         
     def make_target(self, boxes, rois, targets):
         boxes = boxes.clone().detach().cpu().numpy()
         target_copy = targets['box'].clone().detach().cpu().numpy()
-        print(boxes.shape, target_copy.shape)
-        _ious = ious(target_copy, boxes)
+        _ious = ious(boxes, target_copy)
         
-        targets_idx, rois_idx = np.where(_ious > 0.7)
+        target_idx = np.argmax(_ious, axis = 1)
         
-        rois = rois[rois_idx]
-        targets['box'] = targets['box'][targets_idx]
-        targets['class'] = targets['class'][targets_idx]
+        targets['box'] = targets['box'][target_idx]
+        targets['class'] = targets['class'][target_idx]
 
         return rois, targets
         
 
     def forward(self, feature, boxes, image_size, targets = None):
-        print(boxes.shape)
         image_height, image_width = image_size
-
         feature_height, feature_width = feature.shape[-2], feature.shape[-1]
-        output = []
+        
+        scale = min(feature_height, feature_width)/min(image_height, image_width)
+        
+        idx = torch.zeros(boxes.shape[0]).reshape(-1, 1).cuda()
+        
+        boxes = torch.concat([idx, boxes], dim = -1)
+        rois = torchvision.ops.roi_pool(feature, boxes, self.output_size, scale)
+
+        # output = []
         # boxes[:, :2] -= boxes[:, 2:] / 2
         # boxes[:, 2:] += boxes[:, :2]
-        scaled_boxes = boxes.clone()
-        scaled_boxes[:, [0, 2]] *= feature_width/image_width
-        scaled_boxes[:, [1, 3]] *= feature_height/image_height
-        for box in scaled_boxes:
-            x1, y1, x2, y2 = box.int()
-            output.append(self.max_pool(feature[..., y1: y2, x1:x2]))
+        # scaled_boxes = boxes.clone()
+        # scaled_boxes[:, [0, 2]] *= feature_width/image_width
+        # scaled_boxes[:, [1, 3]] *= feature_height/image_height
+        # for box in scaled_boxes:
+        #     x1, y1, x2, y2 = box.int()
+        #     output.append(self.max_pool(feature[..., y1: y2, x1:x2]))
 
-        rois = torch.stack(output)
+        # rois = torch.stack(output)
         
         
         if self.training:
@@ -363,7 +360,7 @@ def train():
     target_labels = torch.tensor([[0, 1],
                                   [1, 0]]).float().cuda()
     target_bboxes = torch.tensor(target_bboxes).cuda()
-    # target_bboxes[:, 2:] -= target_bboxes[:, :2]
+
     target_bboxes *= scale
     
     
@@ -374,8 +371,8 @@ def train():
     img = img.permute(2, 0, 1)
     
     img = transforms.Normalize(mean, std)(img).float().cuda()
+    img = img.unsqueeze(0)
     
-
     optimizer_1  = torch.optim.Adam(nn.ModuleList([vgg, rpn]).parameters(), lr = 1e-4)
     optimizer_2  = torch.optim.Adam(nn.ModuleList([vgg, roi_pool, roi_head]).parameters(), lr = 1e-4)
     optimizer_3  = torch.optim.Adam(rpn.parameters(), lr = 1e-4)
@@ -387,7 +384,8 @@ def train():
         rpn.train()
         roi_pool.train()
         roi_head.train()
-        
+        train_info = {}
+
         for layer in vgg.parameters():
             layer.requires_grad = False
         
@@ -406,11 +404,12 @@ def train():
         }
         vgg_feature = vgg(img)
         region_proposal, scores, loss = rpn(vgg_feature, (h, w), targets['box'])
-        
         loss.backward()
         optimizer_1.step()
         optimizer_1.zero_grad()
-        print(f"{epoch} : loss={loss}, proposal : {region_proposal.shape}")
+        
+        train_info['rpn_loss'] = loss
+        # print(f"{epoch} : rpn_loss={loss}")
 
         # freezing rpn
         for layer in vgg.parameters():
@@ -434,12 +433,14 @@ def train():
         region_proposal, scores, loss = rpn(vgg_feature, (h, w), targets['box'])
             
         rois, targets = roi_pool(vgg_feature, region_proposal, (h, w), targets)
-        print(rois.shape)
         b_class, bbox, loss = roi_head(rois, (h, w), targets)
         
         loss.backward()
         optimizer_2.step()
         optimizer_2.zero_grad()
+        
+        train_info['roi_loss'] = loss
+        # print(f"{epoch} : roi_loss={loss}")
         
         # freezing vgg
         for layer in vgg.parameters():
@@ -461,6 +462,9 @@ def train():
         vgg_feature = vgg(img)
         region_proposal, _, loss = rpn(vgg_feature, (h, w), targets['box'])
         
+        train_info['rpn_finetune_loss'] = loss
+        # print(f"{epoch} : rpn_finetue_loss={loss}")
+
         loss.backward()
         optimizer_3.step()
         optimizer_3.zero_grad()
@@ -490,12 +494,20 @@ def train():
             
         rois, targets = roi_pool(vgg_feature, region_proposal, (h, w), targets)
         b_class, bbox, loss = roi_head(rois, (h, w), targets)
-        
+
+        train_info['roi_finetue_loss'] = loss
+        # print(f"{epoch} : roi_fintue_loss={loss}")
+
         loss.backward()
         optimizer_4.step()
         optimizer_4.zero_grad()
         
-
+        print('[epcoh:{0}] rpn_loss : {1}, roi_head_loss : {2}, rpn_finetune_loss : {3}, roi_finetue_loss : {4}'.format(epoch, *train_info.values()))
+        
+            
+    torch.save(vgg.state_dict(), "vgg.pth")
+    torch.save(rpn.state_dict(), "rnp.pth")
+    torch.save(roi_head.state_dict(), "roi_head.pth")
     #bbox_proposal : [1, x_axis, y_axis, 9, 4]
     
     # bbox_proposal = bbox_proposal.view(-1, 4)
